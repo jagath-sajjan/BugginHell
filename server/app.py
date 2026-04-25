@@ -165,12 +165,19 @@ with gr.Blocks() as app:
         )
 
         ppo_btn = gr.Button("Run Live PPO")
-        ppo_output = gr.Textbox(label="Live PPO Training Log", lines=30)
+
+        with gr.Row():
+            ppo_output = gr.Textbox(label="Live PPO Training Log", lines=28)
+            ppo_table = gr.Dataframe(label="Episode Metrics")
+
+        with gr.Row():
+            reward_plot = gr.Plot(label="Reward Curve")
+            loss_plot = gr.Plot(label="Loss Curve")
 
         ppo_btn.click(
             fn=run_live_ppo_training,
             inputs=[episodes],
-            outputs=[ppo_output],
+            outputs=[ppo_output, ppo_table, reward_plot, loss_plot],
         )
 
 if __name__ == "__main__":

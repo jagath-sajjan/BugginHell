@@ -1,3 +1,6 @@
+import pandas as pd
+import matplotlib.pyplot as plt
+
 from bughunt_env import BugHuntEnv, PPOTrainer
 
 
@@ -14,40 +17,46 @@ def run_live_ppo_training(episodes=25):
     trainer = PPOTrainer(BugHuntEnv)
     logs = trainer.train(episodes=int(episodes))
 
-    lines = []
-    rewards = []
+    rows = []
+    text_lines = []
 
     for row in logs:
-        rewards.append(row["reward"])
+        probs = row["probs"][-1] if row["probs"] else [0, 0, 0, 0, 0]
 
-        lines.append(f"EPISODE {row['episode']}")
-        lines.append(f"Reward: {row['reward']:.2f}")
-        lines.append(f"Loss: {row['loss']:.4f}")
+        rows.append({
+            "episode": row["episode"],
+            "reward": row["reward"],
+            "loss": row["loss"],
+            "read_file": probs[0],
+            "run_test": probs[1],
+            "search_symbol": probs[2],
+            "trace_caller": probs[3],
+            "commit_location": probs[4],
+        })
+
+        text_lines.append(f"EPISODE {row['episode']} | reward={row['reward']:.2f} | loss={row['loss']:.4f}")
 
         if row["actions"]:
-            lines.append("Actions:")
-            for i, action in enumerate(row["actions"]):
-                action_id = action[0]
-                params = action[1]
-                lines.append(f"  {i + 1}. {ACTION_NAMES[action_id]} {params}")
+            readable_actions = []
+            for action in row["actions"]:
+                action_id, params = action
+                readable_actions.append(f"{ACTION_NAMES[action_id]}{params}")
+            text_lines.append(" → ".join(readable_actions))
 
-        if row["probs"]:
-            last_probs = row["probs"][-1]
-            prob_text = ", ".join(
-                f"{ACTION_NAMES[i]}={p:.2f}"
-                for i, p in enumerate(last_probs)
-            )
-            lines.append(f"Final action probabilities: {prob_text}")
+        text_lines.append("-" * 80)
 
-        lines.append("-" * 60)
+    df = pd.DataFrame(rows)
 
-    avg_last_5 = sum(rewards[-5:]) / max(1, len(rewards[-5:]))
+    reward_fig = plt.figure()
+    plt.plot(df["episode"], df["reward"])
+    plt.xlabel("Episode")
+    plt.ylabel("Reward")
+    plt.title("Live PPO Reward Curve")
 
-    summary = [
-        "LIVE PPO TRAINING COMPLETE",
-        f"Episodes: {episodes}",
-        f"Average reward last 5 episodes: {avg_last_5:.2f}",
-        "",
-    ]
+    loss_fig = plt.figure()
+    plt.plot(df["episode"], df["loss"])
+    plt.xlabel("Episode")
+    plt.ylabel("Loss")
+    plt.title("Live PPO Loss Curve")
 
-    return "\n".join(summary + lines)
+    return "\n".join(text_lines), df, reward_fig, loss_fig
