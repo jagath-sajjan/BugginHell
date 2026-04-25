@@ -1,0 +1,17 @@
+name: BugginHell
+version: 0.1.0
+description: Reinforcement learning environment where an agent learns to strategically localize hidden bugs in codebases.
+entrypoint: bughunt_env.environment:BugHuntEnv
+framework: openenv
+tags:
+  - reinforcement-learning
+  - llm-agents
+  - code-debugging
+  - pytorch
+  - huggingface
+tools:
+  - read_file
+  - run_test
+  - search_symbol
+  - trace_caller
+  - commit_location
