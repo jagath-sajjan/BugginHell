@@ -12,3 +12,5 @@ __all__ = [
     "build_llm_prompt",
     "parse_llm_action",
 ]
+
+from bughunt_env.ppo_agent import PPOTrainer, ActorCritic, encode_obs, build_action

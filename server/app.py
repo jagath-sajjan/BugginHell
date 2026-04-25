@@ -8,6 +8,7 @@ PROJECT_ROOT = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(PROJECT_ROOT))
 
 import gradio as gr
+from server.ppo_live import run_live_ppo_training
 from bughunt_env import BugHuntEnv, LocalLLMAgent
 
 class PolicyNet(nn.Module):
@@ -137,19 +138,40 @@ def run_llm():
 
 with gr.Blocks() as app:
     gr.Markdown("# BugginHell — RL Bug Hunter")
-    gr.Markdown("Random vs RL vs LLM Agent")
+    gr.Markdown("A PPO-powered environment where agents learn strategic bug localization.")
 
-    btn = gr.Button("Run Demo")
+    with gr.Tab("Agent Comparison"):
+        btn = gr.Button("Run Agent Comparison")
 
-    with gr.Row():
-        out1 = gr.Textbox(label="Random Agent", lines=20)
-        out2 = gr.Textbox(label="RL Agent", lines=20)
-        out3 = gr.Textbox(label="LLM Agent", lines=20)
+        with gr.Row():
+            out1 = gr.Textbox(label="Random Agent", lines=20)
+            out2 = gr.Textbox(label="RL Agent", lines=20)
+            out3 = gr.Textbox(label="LLM Agent", lines=20)
 
-    btn.click(
-        fn=lambda: (run_random(), run_rl(), run_llm()),
-        outputs=[out1, out2, out3],
-    )
+        btn.click(
+            fn=lambda: (run_random(), run_rl(), run_llm()),
+            outputs=[out1, out2, out3],
+        )
+
+    with gr.Tab("Live PPO Training"):
+        gr.Markdown("Train a fresh PPO agent live on the BugHunt environment.")
+
+        episodes = gr.Slider(
+            minimum=5,
+            maximum=100,
+            value=25,
+            step=5,
+            label="PPO Episodes",
+        )
+
+        ppo_btn = gr.Button("Run Live PPO")
+        ppo_output = gr.Textbox(label="Live PPO Training Log", lines=30)
+
+        ppo_btn.click(
+            fn=run_live_ppo_training,
+            inputs=[episodes],
+            outputs=[ppo_output],
+        )
 
 if __name__ == "__main__":
     app.launch()
