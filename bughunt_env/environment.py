@@ -1,14 +1,14 @@
 from __future__ import annotations
 
 from dataclasses import dataclass, field
-from typing import Dict, List, Optional, Tuple
+from typing import Any, Dict, List, Optional, Tuple
 import random
 
 import gymnasium as gym
 from gymnasium import spaces
 
 from bughunt_env.fixtures import BugCase, get_cases
-from bughunt_env.reward import score_commit, budget_exhausted_reward, tool_step_reward
+from bughunt_env.reward import RewardBreakdown, budget_exhausted_reward, score_commit, tool_step_reward
 
 
 @dataclass
@@ -35,22 +35,6 @@ class BugHuntObservation:
 
 
 class BugHuntEnv(gym.Env):
-    """
-    BugHunt RL environment.
-
-    Action IDs:
-    0 = read_file
-    1 = run_test
-    2 = search_symbol
-    3 = trace_caller
-    4 = commit_location
-
-    For Phase 1, each action can also accept params through step((action_id, params)).
-    Example:
-        env.step((0, {"path": "cart.py"}))
-        env.step((4, {"file": "cart.py", "line": 3}))
-    """
-
     metadata = {"render_modes": ["human"]}
 
     def __init__(self, max_steps: int = 10, seed: Optional[int] = None):
@@ -58,32 +42,32 @@ class BugHuntEnv(gym.Env):
         self.max_steps = max_steps
         self.rng = random.Random(seed)
         self.cases: List[BugCase] = get_cases()
+        self.case_index = {case.name: case for case in self.cases}
         self.case: Optional[BugCase] = None
         self._state: Optional[BugHuntState] = None
 
         self.action_space = spaces.Discrete(5)
-        self.observation_space = spaces.Dict(
-            {
-                "steps_left": spaces.Discrete(max_steps + 1),
-            }
-        )
+        self.observation_space = spaces.Dict({"steps_left": spaces.Discrete(max_steps + 1)})
 
     def reset(self, *, seed: Optional[int] = None, options: Optional[dict] = None):
         super().reset(seed=seed)
-
         if seed is not None:
             self.rng.seed(seed)
 
-        self.case = self.rng.choice(self.cases)
+        case_name = (options or {}).get("case_name")
+        self.case = self.case_index.get(case_name) if case_name else self.rng.choice(self.cases)
+        if self.case is None:
+            raise KeyError(f"Unknown case_name: {case_name}")
 
+        shuffled_tree = list(self.case.file_tree)
+        self.rng.shuffle(shuffled_tree)
         self._state = BugHuntState(
             case_name=self.case.name,
-            file_tree=self.case.file_tree,
+            file_tree=shuffled_tree,
             stderr=self.case.stderr,
             failing_test=self.case.failing_test,
             max_steps=self.max_steps,
         )
-
         return self._obs(), self._info()
 
     def state(self) -> BugHuntState:
@@ -92,7 +76,6 @@ class BugHuntEnv(gym.Env):
 
     def step(self, action):
         self._require_reset()
-
         if self._state.done:
             return self._obs(), 0.0, True, False, self._info()
 
@@ -102,36 +85,34 @@ class BugHuntEnv(gym.Env):
         reward = tool_step_reward()
         terminated = False
         truncated = False
-
+        reward_breakdown: Optional[RewardBreakdown] = None
         output = self._execute_action(action_id, params)
 
         if action_id == 4:
             committed_file = params.get("file", "")
             committed_line = int(params.get("line", -999))
-
-            breakdown = score_commit(
+            reward_breakdown = score_commit(
                 committed_file=committed_file,
                 committed_line=committed_line,
                 target_file=self.case.bug_file,
                 target_line=self.case.bug_line,
                 steps_used=self._state.steps_used,
                 max_steps=self.max_steps,
+                prior_evidence_steps=len(self._state.history),
             )
-            reward = breakdown.reward
-            output = breakdown.reason
+            reward = reward_breakdown.reward
+            output = reward_breakdown.reason
             terminated = True
             self._state.done = True
-
         elif self._state.steps_used >= self.max_steps:
             reward = budget_exhausted_reward(self._state.steps_used)
-            output += "\\nBudget exhausted. Episode failed."
+            output += "\nBudget exhausted. Episode failed."
             truncated = True
             self._state.done = True
 
         self._state.last_tool_output = output
         self._state.history.append(self._format_history(action_id, params, output, reward))
-
-        return self._obs(), reward, terminated, truncated, self._info()
+        return self._obs(), reward, terminated, truncated, self._info(reward_breakdown=reward_breakdown)
 
     def render(self):
         self._require_reset()
@@ -139,34 +120,25 @@ class BugHuntEnv(gym.Env):
         print(f"Case: {self._state.case_name}")
         print(f"Failing test: {self._state.failing_test}")
         print(f"Steps: {self._state.steps_used}/{self._state.max_steps}")
-        print(f"Last output:\\n{self._state.last_tool_output}")
+        print(f"Last output:\n{self._state.last_tool_output}")
 
-    def _execute_action(self, action_id: int, params: Dict) -> str:
+    def _execute_action(self, action_id: int, params: Dict[str, Any]) -> str:
         if action_id == 0:
-            path = params.get("path", "")
-            return self._read_file(path)
-
+            return self._read_file(params.get("path", ""))
         if action_id == 1:
-            name = params.get("name", self.case.failing_test)
-            return self._run_test(name)
-
+            return self._run_test(params.get("name", self.case.failing_test))
         if action_id == 2:
-            name = params.get("name", "")
-            return self._search_symbol(name)
-
+            return self._search_symbol(params.get("name", ""))
         if action_id == 3:
-            fn = params.get("fn", "")
-            return self._trace_caller(fn)
-
+            return self._trace_caller(params.get("fn", ""))
         if action_id == 4:
             return "Committing bug location..."
-
         return "Invalid action."
 
     def _read_file(self, path: str) -> str:
         if path not in self.case.files:
             return f"File not found: {path}"
-        return f"--- {path} ---\\n{self.case.files[path]}"
+        return f"--- {path} ---\n{self.case.files[path]}"
 
     def _run_test(self, name: str) -> str:
         if name == self.case.failing_test or name == "all":
@@ -193,21 +165,24 @@ class BugHuntEnv(gym.Env):
             history=list(self._state.history),
         )
 
-    def _info(self) -> Dict:
+    def _info(self, reward_breakdown: Optional[RewardBreakdown] = None) -> Dict[str, Any]:
         return {
             "case_name": self.case.name if self.case else None,
             "steps_used": self._state.steps_used if self._state else 0,
             "max_steps": self.max_steps,
+            "bug_file": self.case.bug_file if self.case else None,
+            "bug_line": self.case.bug_line if self.case else None,
+            "bug_summary": self.case.bug_summary if self.case else None,
+            "reward_breakdown": reward_breakdown.as_dict() if reward_breakdown else None,
         }
 
-    def _parse_action(self, action) -> Tuple[int, Dict]:
+    def _parse_action(self, action) -> Tuple[int, Dict[str, Any]]:
         if isinstance(action, tuple):
             action_id, params = action
             return int(action_id), dict(params)
-
         return int(action), {}
 
-    def _format_history(self, action_id: int, params: Dict, output: str, reward: float) -> str:
+    def _format_history(self, action_id: int, params: Dict[str, Any], output: str, reward: float) -> str:
         names = {
             0: "read_file",
             1: "run_test",
@@ -215,7 +190,7 @@ class BugHuntEnv(gym.Env):
             3: "trace_caller",
             4: "commit_location",
         }
-        short_output = output.replace("\\n", " ")[:160]
+        short_output = output.replace("\n", " ")[:160]
         return f"{names.get(action_id, 'unknown')}({params}) -> reward={reward} -> {short_output}"
 
     def _require_reset(self):

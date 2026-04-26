@@ -11,7 +11,7 @@ def test_env_reset_works():
     assert info["steps_used"] == 0
 
 
-def test_correct_commit_gets_positive_reward():
+def test_blind_correct_commit_gets_penalized():
     env = BugHuntEnv(seed=1)
     obs, info = env.reset(seed=1)
 
@@ -24,7 +24,25 @@ def test_correct_commit_gets_positive_reward():
 
     assert terminated is True
     assert truncated is False
+    assert reward < 0
+    assert info["reward_breakdown"]["evidence_sufficient"] is False
+
+
+def test_evidence_backed_correct_commit_gets_positive_reward():
+    env = BugHuntEnv(seed=1)
+    obs, info = env.reset(seed=1)
+
+    env.step((1, {"name": obs.failing_test}))
+    env.step((2, {"name": obs.failing_test}))
+
+    target_file = env.case.bug_file
+    target_line = env.case.bug_line
+    obs, reward, terminated, truncated, info = env.step((4, {"file": target_file, "line": target_line}))
+
+    assert terminated is True
+    assert truncated is False
     assert reward > 0
+    assert info["reward_breakdown"]["evidence_sufficient"] is True
 
 
 def test_wrong_commit_gets_negative_reward():

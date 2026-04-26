@@ -1,13 +1,36 @@
+from __future__ import annotations
+
 from dataclasses import dataclass
 
 
-@dataclass
+@dataclass(frozen=True)
 class RewardBreakdown:
     reward: float
+    base_step_penalty: float
+    premature_commit_penalty: float
+    file_score: float
+    line_score: float
+    efficiency_bonus_score: float
     correct_file: bool
     correct_line: bool
     efficiency_bonus: bool
+    evidence_sufficient: bool
     reason: str
+
+    def as_dict(self) -> dict:
+        return {
+            "reward": self.reward,
+            "base_step_penalty": self.base_step_penalty,
+            "premature_commit_penalty": self.premature_commit_penalty,
+            "file_score": self.file_score,
+            "line_score": self.line_score,
+            "efficiency_bonus_score": self.efficiency_bonus_score,
+            "correct_file": self.correct_file,
+            "correct_line": self.correct_line,
+            "efficiency_bonus": self.efficiency_bonus,
+            "evidence_sufficient": self.evidence_sufficient,
+            "reason": self.reason,
+        }
 
 
 def score_commit(
@@ -17,37 +40,41 @@ def score_commit(
     target_line: int,
     steps_used: int,
     max_steps: int,
+    prior_evidence_steps: int,
 ) -> RewardBreakdown:
-    reward = 0.0
+    evidence_sufficient = prior_evidence_steps >= 2
     correct_file = committed_file == target_file
-    correct_line = abs(committed_line - target_line) <= 5
-    efficiency_bonus = steps_used <= 3
+    correct_line = committed_line == target_line
+    efficiency_bonus = evidence_sufficient and 2 <= steps_used <= 5 and correct_file and correct_line
 
-    reward -= 0.1 * steps_used
-
-    if correct_file:
-        reward += 1.0
-    else:
-        reward -= 1.0
-
-    if correct_file and correct_line:
-        reward += 0.5
-
-    if correct_file and correct_line and efficiency_bonus:
-        reward += 0.4
+    base_step_penalty = round(-0.1 * steps_used, 3)
+    premature_commit_penalty = 0.0 if evidence_sufficient else -2.0
+    file_score = 1.0 if correct_file else -1.0
+    line_score = 0.75 if correct_file and correct_line else 0.0
+    efficiency_bonus_score = 0.4 if efficiency_bonus else 0.0
+    reward = round(
+        base_step_penalty + premature_commit_penalty + file_score + line_score + efficiency_bonus_score,
+        3,
+    )
 
     reason = (
         f"commit={committed_file}:{committed_line}, "
         f"target={target_file}:{target_line}, "
         f"correct_file={correct_file}, correct_line={correct_line}, "
-        f"steps={steps_used}/{max_steps}, reward={reward:.2f}"
+        f"evidence_steps={prior_evidence_steps}, steps={steps_used}/{max_steps}, reward={reward:.2f}"
     )
 
     return RewardBreakdown(
-        reward=round(reward, 3),
+        reward=reward,
+        base_step_penalty=base_step_penalty,
+        premature_commit_penalty=premature_commit_penalty,
+        file_score=file_score,
+        line_score=line_score,
+        efficiency_bonus_score=efficiency_bonus_score,
         correct_file=correct_file,
         correct_line=correct_line,
-        efficiency_bonus=efficiency_bonus and correct_file and correct_line,
+        efficiency_bonus=efficiency_bonus,
+        evidence_sufficient=evidence_sufficient,
         reason=reason,
     )
 

@@ -1,8 +1,15 @@
+from __future__ import annotations
+
 import json
+import os
 import re
-from typing import Optional
+from dataclasses import dataclass
+from typing import Any, Dict, Optional, Tuple
+
+from openai import OpenAI
 
 from bughunt_env.environment import BugHuntObservation
+from bughunt_env.ppo_agent import build_action
 
 
 ACTION_TO_ID = {
@@ -13,121 +20,129 @@ ACTION_TO_ID = {
     "commit_location": 4,
 }
 
+DEFAULT_BASE_URL = "https://ai.hackclub.com/proxy/v1"
+DEFAULT_API_KEY = "sk-hc-v1-2de503367fa6405bbc2c54865d51247136731a52445d401bb8b2dc3390ca2e2a"
+DEFAULT_MODEL = "qwen/qwen3-32b"
+
+
+@dataclass
+class LLMDecision:
+    action: Tuple[int, Dict[str, Any]]
+    raw_response: str
+    prompt: str
+    parse_error: Optional[str] = None
+
 
 def build_llm_prompt(obs: BugHuntObservation) -> str:
+    history = "\n".join(f"- {entry}" for entry in obs.history[-8:]) or "- none yet"
+    file_tree = "\n".join(f"- {path}" for path in obs.file_tree)
     return f"""
-You are BugHunt RL, a debugging agent inside a Python repository.
+You are BugHunt, a debugging agent navigating a Python codebase.
 
-Your job:
-Find the hidden bug using as few tool calls as possible.
+Pick exactly one tool call as JSON.
 
-Allowed tools:
+Allowed schemas:
 {{"tool":"read_file","path":"file.py"}}
 {{"tool":"run_test","name":"test_name"}}
 {{"tool":"search_symbol","name":"symbol"}}
-{{"tool":"trace_caller","fn":"function"}}
-{{"tool":"commit_location","file":"file.py","line":3}}
+{{"tool":"trace_caller","fn":"function_name"}}
+{{"tool":"commit_location","file":"file.py","line":12}}
 
 Rules:
-- Return ONLY valid JSON.
-- Do not explain.
-- Prefer search_symbol first when you see a failing test.
-- Prefer trace_caller after identifying a function.
-- Commit only when you know the likely bug file and line.
+- Return JSON only.
+- Use the observation to narrow the bug before committing.
+- Prefer a source file over a test file when reading or committing.
+- If the error names a function, search or trace that function.
+- Commit only when the bug file and likely line are grounded in evidence from prior tool outputs.
 
+Current observation:
 Files:
-{obs.file_tree}
+{file_tree}
 
 Failing test:
 {obs.failing_test}
 
-Error:
-{obs.stderr}
+stderr:
+{obs.stderr or "<empty>"}
 
-Last tool output:
-{obs.last_tool_output}
+last_tool_output:
+{obs.last_tool_output or "<empty>"}
 
-History:
-{obs.history}
+history:
+{history}
 
-Steps left:
-{obs.steps_left}
+steps_left: {obs.steps_left}
 """.strip()
 
 
 def parse_llm_action(text: str, obs: BugHuntObservation):
-    try:
-        match = re.search(r"\{.*?\}", text, re.DOTALL)
-        if not match:
-            raise ValueError("No JSON object found")
+    match = re.search(r"\{.*\}", text, re.DOTALL)
+    if not match:
+        raise ValueError("No JSON object found in model response.")
 
-        data = json.loads(match.group(0))
-        tool = data.get("tool")
+    data = json.loads(match.group(0))
+    tool = data.get("tool")
+    if tool == "read_file":
+        source_files = [path for path in obs.file_tree if path.endswith(".py") and "test" not in path]
+        fallback = source_files[0] if source_files else obs.file_tree[0]
+        return (0, {"path": data.get("path", fallback)})
+    if tool == "run_test":
+        return (1, {"name": data.get("name", obs.failing_test)})
+    if tool == "search_symbol":
+        return (2, {"name": data.get("name", obs.failing_test)})
+    if tool == "trace_caller":
+        return (3, {"fn": data.get("fn", obs.failing_test)})
+    if tool == "commit_location":
+        source_files = [path for path in obs.file_tree if path.endswith(".py") and "test" not in path]
+        fallback = source_files[0] if source_files else obs.file_tree[0]
+        return (4, {"file": data.get("file", fallback), "line": int(data.get("line", 1))})
 
-        if tool == "read_file":
-            return (0, {"path": data.get("path", obs.file_tree[0])})
-
-        if tool == "run_test":
-            return (1, {"name": data.get("name", obs.failing_test)})
-
-        if tool == "search_symbol":
-            return (2, {"name": data.get("name", obs.failing_test)})
-
-        if tool == "trace_caller":
-            return (3, {"fn": data.get("fn", "")})
-
-        if tool == "commit_location":
-            return (
-                4,
-                {
-                    "file": data.get("file", obs.file_tree[0]),
-                    "line": int(data.get("line", 1)),
-                },
-            )
-
-    except Exception:
-        pass
-
-    return (1, {"name": obs.failing_test})
+    raise ValueError(f"Unknown tool: {tool}")
 
 
-class LocalLLMAgent:
-    def __init__(self, model_name: str = "Qwen/Qwen2.5-0.5B-Instruct"):
-        from transformers import AutoModelForCausalLM, AutoTokenizer
-
-        self.tokenizer = AutoTokenizer.from_pretrained(model_name)
-        self.model = AutoModelForCausalLM.from_pretrained(model_name, device_map="auto")
-        self.model.eval()
-
-    def act(self, obs: BugHuntObservation):
-        prompt = build_llm_prompt(obs)
-
-        messages = [
-            {"role": "system", "content": "You are a precise code debugging agent."},
-            {"role": "user", "content": prompt},
-        ]
-
-        if hasattr(self.tokenizer, "apply_chat_template") and self.tokenizer.chat_template:
-            input_text = self.tokenizer.apply_chat_template(
-                messages,
-                tokenize=False,
-                add_generation_prompt=True,
-            )
-        else:
-            input_text = prompt
-
-        inputs = self.tokenizer(input_text, return_tensors="pt").to(self.model.device)
-
-        outputs = self.model.generate(
-            **inputs,
-            max_new_tokens=96,
-            do_sample=False,
-            temperature=None,
-            top_p=None,
-            pad_token_id=self.tokenizer.eos_token_id,
+class APIAgent:
+    def __init__(
+        self,
+        model_name: str = DEFAULT_MODEL,
+        *,
+        api_key: Optional[str] = None,
+        base_url: str = DEFAULT_BASE_URL,
+        timeout: float = 30.0,
+    ):
+        self.model_name = model_name
+        self.client = OpenAI(
+            api_key=api_key or os.getenv("HACKCLUB_API_KEY") or os.getenv("OPENAI_API_KEY") or DEFAULT_API_KEY,
+            base_url=base_url,
+            timeout=timeout,
         )
 
-        generated = outputs[0][inputs["input_ids"].shape[-1]:]
-        text = self.tokenizer.decode(generated, skip_special_tokens=True)
+    def decide(self, obs: BugHuntObservation) -> LLMDecision:
+        prompt = build_llm_prompt(obs)
+        raw_text = ""
+        parse_error: Optional[str] = None
 
-        return parse_llm_action(text, obs), text
+        try:
+            response = self.client.chat.completions.create(
+                model=self.model_name,
+                temperature=0.1,
+                response_format={"type": "json_object"},
+                messages=[
+                    {"role": "system", "content": "You are a precise debugging agent. Return one JSON tool call only."},
+                    {"role": "user", "content": prompt},
+                ],
+            )
+            raw_text = response.choices[0].message.content or ""
+            action = parse_llm_action(raw_text, obs)
+        except Exception as exc:
+            parse_error = str(exc)
+            action = build_action(1 if obs.steps_left > 1 else 4, obs)
+
+        return LLMDecision(action=action, raw_response=raw_text, prompt=prompt, parse_error=parse_error)
+
+    def act(self, obs: BugHuntObservation):
+        decision = self.decide(obs)
+        return decision.action, decision.raw_response
+
+
+class LocalLLMAgent(APIAgent):
+    pass

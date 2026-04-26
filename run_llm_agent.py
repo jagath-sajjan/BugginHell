@@ -1,23 +1,21 @@
-from pathlib import Path
 import os
+from pathlib import Path
 
 from dotenv import load_dotenv
 
 load_dotenv(Path(".env"))
 
-hf_token = os.getenv("HF_TOKEN")
-model_name = os.getenv("MODEL_NAME", "Qwen/Qwen2.5-0.5B-Instruct")
-
-if hf_token:
-    os.environ["HF_TOKEN"] = hf_token
-    os.environ["HUGGING_FACE_HUB_TOKEN"] = hf_token
+model_name = os.getenv("MODEL_NAME", "qwen/qwen3-32b")
 
 from bughunt_env import BugHuntEnv, LocalLLMAgent
 
 env = BugHuntEnv(seed=1)
 obs, info = env.reset(seed=1)
 
-agent = LocalLLMAgent(model_name=model_name)
+agent = LocalLLMAgent(
+    model_name=model_name,
+    api_key=os.getenv("HACKCLUB_API_KEY") or os.getenv("OPENAI_API_KEY"),
+)
 
 print("CASE:", info["case_name"])
 print("FAILING:", obs.failing_test)
